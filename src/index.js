@@ -17,17 +17,6 @@ const staticCfg = {
   redirectUri: process.env.TWITCH_REDIRECT_URI || `http://localhost:${port}/auth/callback`
 };
 
-const auth = {
-  token: process.env.TWITCH_USER_ACCESS_TOKEN || null,
-  refreshToken: null,
-  tokenExpiresAt: null,
-  moderatorId: process.env.TWITCH_MODERATOR_ID || null,
-  broadcasterId: process.env.TWITCH_BROADCASTER_ID || null,
-  broadcasterLogin: process.env.TWITCH_BROADCASTER_LOGIN || null,
-  meLogin: null,
-  tokenScopes: []
-};
-
 const oauthState = new Map();
 const authStore = createAuthStore();
 
@@ -36,116 +25,175 @@ if (!staticCfg.clientSecret) console.warn('[warn] missing env: TWITCH_CLIENT_SEC
 
 const store = createStore(process.env.DB_PATH || './tracker.db');
 
-(function bootAuthFromDisk(){
-  const saved = authStore.load();
-  if (!saved) return;
-  auth.token = saved.token || auth.token;
-  auth.refreshToken = saved.refreshToken || null;
-  auth.tokenExpiresAt = saved.tokenExpiresAt || null;
-  auth.moderatorId = saved.moderatorId || auth.moderatorId;
-  auth.meLogin = saved.meLogin || null;
-  auth.broadcasterId = saved.broadcasterId || auth.broadcasterId;
-  auth.broadcasterLogin = saved.broadcasterLogin || auth.broadcasterLogin;
-  auth.tokenScopes = saved.tokenScopes || [];
+function newSessionAuth() {
+  return {
+    token: null,
+    refreshToken: null,
+    tokenExpiresAt: null,
+    moderatorId: null,
+    meLogin: null,
+    tokenScopes: [],
+    broadcasterId: null,
+    broadcasterLogin: null,
+    current: new Set(),
+    lastPollAt: null,
+    lastError: null
+  };
+}
+
+const sessions = new Map(); // sid -> auth object
+
+(function bootAuthFromDisk() {
+  const saved = authStore.load() || {};
+  for (const [sid, a] of Object.entries(saved)) {
+    const v = newSessionAuth();
+    v.token = a.token || null;
+    v.refreshToken = a.refreshToken || null;
+    v.tokenExpiresAt = a.tokenExpiresAt || null;
+    v.moderatorId = a.moderatorId || null;
+    v.meLogin = a.meLogin || null;
+    v.tokenScopes = a.tokenScopes || [];
+    v.broadcasterId = a.broadcasterId || null;
+    v.broadcasterLogin = a.broadcasterLogin || null;
+    v.current = store.getOpenSet(v.broadcasterLogin || '__none__');
+    sessions.set(sid, v);
+  }
 })();
 
-function persistAuth(){
-  authStore.save({
-    token: auth.token,
-    refreshToken: auth.refreshToken,
-    tokenExpiresAt: auth.tokenExpiresAt,
-    moderatorId: auth.moderatorId,
-    meLogin: auth.meLogin,
-    broadcasterId: auth.broadcasterId,
-    broadcasterLogin: auth.broadcasterLogin,
-    tokenScopes: auth.tokenScopes
-  });
+function persistAuth() {
+  const out = {};
+  for (const [sid, a] of sessions.entries()) {
+    out[sid] = {
+      token: a.token,
+      refreshToken: a.refreshToken,
+      tokenExpiresAt: a.tokenExpiresAt,
+      moderatorId: a.moderatorId,
+      meLogin: a.meLogin,
+      tokenScopes: a.tokenScopes,
+      broadcasterId: a.broadcasterId,
+      broadcasterLogin: a.broadcasterLogin
+    };
+  }
+  authStore.save(out);
 }
-const cfgForEnrich = {
-  get clientId() { return staticCfg.clientId; },
-  get userAccessToken() { return auth.token; }
-};
-const enricher = createEnricher({ cfg: cfgForEnrich, store });
 
-let current = store.getOpenSet(auth.broadcasterLogin || '__none__');
-let lastPollAt = null;
-let lastError = null;
+function parseCookies(req) {
+  const raw = req.headers.cookie || '';
+  const out = {};
+  for (const part of raw.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    const k = part.slice(0, i).trim();
+    const v = decodeURIComponent(part.slice(i + 1).trim());
+    out[k] = v;
+  }
+  return out;
+}
 
-async function ensureFreshToken() {
-  if (!auth.refreshToken) return;
-  if (!auth.tokenExpiresAt) return;
-  if (Date.now() < auth.tokenExpiresAt - 60_000) return;
+function getSid(req, res) {
+  const cookies = parseCookies(req);
+  let sid = cookies.tp_sid;
+  if (!sid) {
+    sid = crypto.randomBytes(24).toString('hex');
+    const secure = (req.headers['x-forwarded-proto'] || '').toString().includes('https') ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `tp_sid=${sid}; Path=/; HttpOnly; SameSite=Lax${secure}`);
+  }
+  return sid;
+}
+
+function getSessionAuth(req, res) {
+  const sid = getSid(req, res);
+  if (!sessions.has(sid)) sessions.set(sid, newSessionAuth());
+  return { sid, auth: sessions.get(sid) };
+}
+
+async function ensureFreshToken(a) {
+  if (!a.refreshToken || !a.tokenExpiresAt) return;
+  if (Date.now() < a.tokenExpiresAt - 60_000) return;
 
   const refreshed = await refreshAccessToken({
     clientId: staticCfg.clientId,
     clientSecret: staticCfg.clientSecret,
-    refreshToken: auth.refreshToken
+    refreshToken: a.refreshToken
   });
-  auth.token = refreshed.access_token;
-  auth.refreshToken = refreshed.refresh_token || auth.refreshToken;
-  auth.tokenScopes = refreshed.scope || auth.tokenScopes;
-  auth.tokenExpiresAt = Date.now() + (Number(refreshed.expires_in || 0) * 1000);
+  a.token = refreshed.access_token;
+  a.refreshToken = refreshed.refresh_token || a.refreshToken;
+  a.tokenScopes = refreshed.scope || a.tokenScopes;
+  a.tokenExpiresAt = Date.now() + (Number(refreshed.expires_in || 0) * 1000);
   persistAuth();
 }
 
-async function tick() {
-  if (!staticCfg.clientId || !auth.token || !auth.broadcasterId || !auth.moderatorId || !auth.broadcasterLogin) return;
+const cfgForEnrich = {
+  get clientId() { return staticCfg.clientId; },
+  // uses whichever token most recently queued; enrich failures are non-fatal
+  userAccessToken: null
+};
+const enricher = createEnricher({ cfg: cfgForEnrich, store });
+
+async function tickOne(a) {
+  if (!staticCfg.clientId || !a.token || !a.broadcasterId || !a.moderatorId || !a.broadcasterLogin) return;
 
   const ts = Date.now();
-  lastPollAt = ts;
+  a.lastPollAt = ts;
   try {
-    await ensureFreshToken();
+    await ensureFreshToken(a);
     const next = await fetchChatters({
       clientId: staticCfg.clientId,
-      userAccessToken: auth.token,
-      broadcasterId: auth.broadcasterId,
-      moderatorId: auth.moderatorId
+      userAccessToken: a.token,
+      broadcasterId: a.broadcasterId,
+      moderatorId: a.moderatorId
     });
 
-    const joined = [...next].filter(u => !current.has(u));
-    const left = [...current].filter(u => !next.has(u));
+    const joined = [...next].filter(u => !a.current.has(u));
+    const left = [...a.current].filter(u => !next.has(u));
 
-    for (const u of joined) store.eventJoin(u, ts, auth.broadcasterLogin);
-    for (const u of left) store.eventLeave(u, ts, auth.broadcasterLogin);
+    for (const u of joined) store.eventJoin(u, ts, a.broadcasterLogin);
+    for (const u of left) store.eventLeave(u, ts, a.broadcasterLogin);
 
     if (joined.length || left.length) {
-      console.log(`[tick] joins=${joined.length} leaves=${left.length}`);
+      cfgForEnrich.userAccessToken = a.token;
       enricher.enqueue(joined);
     }
 
-    current = next;
-    lastError = null;
+    a.current = next;
+    a.lastError = null;
   } catch (err) {
     const status = err?.response?.status;
-    if (status === 401 && auth.refreshToken) {
+    if (status === 401 && a.refreshToken) {
       try {
         const refreshed = await refreshAccessToken({
           clientId: staticCfg.clientId,
           clientSecret: staticCfg.clientSecret,
-          refreshToken: auth.refreshToken
+          refreshToken: a.refreshToken
         });
-        auth.token = refreshed.access_token;
-        auth.refreshToken = refreshed.refresh_token || auth.refreshToken;
-        auth.tokenScopes = refreshed.scope || auth.tokenScopes;
-        auth.tokenExpiresAt = Date.now() + (Number(refreshed.expires_in || 0) * 1000);
+        a.token = refreshed.access_token;
+        a.refreshToken = refreshed.refresh_token || a.refreshToken;
+        a.tokenScopes = refreshed.scope || a.tokenScopes;
+        a.tokenExpiresAt = Date.now() + (Number(refreshed.expires_in || 0) * 1000);
         persistAuth();
         return;
       } catch (e2) {
-        lastError = e2?.response?.data || e2?.message || String(e2);
-        console.error('[tick:refresh-error]', lastError);
+        a.lastError = e2?.response?.data || e2?.message || String(e2);
         return;
       }
     }
-    lastError = err?.response?.data || err?.message || String(err);
-    console.error('[tick:error]', lastError);
+    a.lastError = err?.response?.data || err?.message || String(err);
   }
 }
 
-setInterval(tick, pollMs);
+async function tickAll() {
+  for (const a of sessions.values()) {
+    // eslint-disable-next-line no-await-in-loop
+    await tickOne(a);
+  }
+}
+
+setInterval(() => tickAll().catch(() => {}), pollMs);
 setInterval(() => enricher.tick().catch((e) => console.error('[enrich:error]', e?.message || e)), 4000);
-setTimeout(tick, 1500);
+setTimeout(() => tickAll().catch(() => {}), 1500);
 
 app.get('/auth/start', (req, res) => {
+  const { sid } = getSessionAuth(req, res);
   if (!staticCfg.clientId || !staticCfg.clientSecret) {
     return res.status(400).json({ error: 'Set TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET first.' });
   }
@@ -154,7 +202,7 @@ app.get('/auth/start', (req, res) => {
   if (!broadcasterLogin) return res.status(400).json({ error: 'Missing ?channel=<twitch_login>' });
 
   const state = crypto.randomBytes(18).toString('hex');
-  oauthState.set(state, { broadcasterLogin, createdAt: Date.now() });
+  oauthState.set(state, { sid, broadcasterLogin, createdAt: Date.now() });
 
   const scope = encodeURIComponent('moderator:read:chatters moderator:read:followers');
   const url = `https://id.twitch.tv/oauth2/authorize?client_id=${encodeURIComponent(staticCfg.clientId)}&redirect_uri=${encodeURIComponent(staticCfg.redirectUri)}&response_type=code&scope=${scope}&state=${state}`;
@@ -169,6 +217,8 @@ app.get('/auth/callback', async (req, res) => {
     oauthState.delete(state);
 
     if (!code || !st) return res.status(400).send('Invalid OAuth callback (missing/invalid state).');
+    if (!sessions.has(st.sid)) sessions.set(st.sid, newSessionAuth());
+    const a = sessions.get(st.sid);
 
     const tokenData = await exchangeCodeForToken({
       clientId: staticCfg.clientId,
@@ -177,108 +227,106 @@ app.get('/auth/callback', async (req, res) => {
       redirectUri: staticCfg.redirectUri
     });
 
-    auth.token = tokenData.access_token;
-    auth.refreshToken = tokenData.refresh_token || null;
-    auth.tokenScopes = tokenData.scope || [];
-    auth.tokenExpiresAt = Date.now() + (Number(tokenData.expires_in || 0) * 1000);
+    a.token = tokenData.access_token;
+    a.refreshToken = tokenData.refresh_token || null;
+    a.tokenScopes = tokenData.scope || [];
+    a.tokenExpiresAt = Date.now() + (Number(tokenData.expires_in || 0) * 1000);
 
-    const me = await fetchMe({ clientId: staticCfg.clientId, userAccessToken: auth.token });
+    const me = await fetchMe({ clientId: staticCfg.clientId, userAccessToken: a.token });
     if (!me) throw new Error('Unable to fetch moderator identity from token.');
-    auth.moderatorId = me.id;
-    auth.meLogin = me.login;
+    a.moderatorId = me.id;
+    a.meLogin = me.login;
 
     const broadcaster = await fetchUserByLogin({
       clientId: staticCfg.clientId,
-      userAccessToken: auth.token,
+      userAccessToken: a.token,
       login: st.broadcasterLogin
     });
 
     if (!broadcaster) throw new Error(`Broadcaster login not found: ${st.broadcasterLogin}`);
-    auth.broadcasterId = broadcaster.id;
-    auth.broadcasterLogin = broadcaster.login;
-    current = store.getOpenSet(auth.broadcasterLogin);
+    a.broadcasterId = broadcaster.id;
+    a.broadcasterLogin = broadcaster.login;
+    a.current = store.getOpenSet(a.broadcasterLogin);
     persistAuth();
 
-    res.send(`OAuth complete ✅<br/>Channel: ${auth.broadcasterLogin}<br/>Moderator token user: ${auth.meLogin}<br/><a href='/'>Open dashboard</a>`);
+    res.send(`OAuth complete ✅<br/>Channel: ${a.broadcasterLogin}<br/>Moderator token user: ${a.meLogin}<br/><a href='/'>Open dashboard</a>`);
   } catch (e) {
     res.status(500).send(`OAuth failed: ${e?.message || e}`);
   }
 });
 
-app.get('/auth/status', (_req, res) => {
+app.get('/auth/status', (req, res) => {
+  const { auth: a } = getSessionAuth(req, res);
   res.json({
     configured: !!(staticCfg.clientId && staticCfg.clientSecret),
-    authed: !!auth.token,
-    moderatorId: auth.moderatorId,
-    moderatorLogin: auth.meLogin,
-    broadcasterId: auth.broadcasterId,
-    broadcasterLogin: auth.broadcasterLogin,
-    scopes: auth.tokenScopes,
-    tokenExpiresAt: auth.tokenExpiresAt
+    authed: !!a.token,
+    moderatorId: a.moderatorId,
+    moderatorLogin: a.meLogin,
+    broadcasterId: a.broadcasterId,
+    broadcasterLogin: a.broadcasterLogin,
+    scopes: a.tokenScopes,
+    tokenExpiresAt: a.tokenExpiresAt
   });
 });
 
-app.post('/auth/logout', (_req, res) => {
-  auth.token = null;
-  auth.refreshToken = null;
-  auth.tokenExpiresAt = null;
-  auth.moderatorId = null;
-  auth.meLogin = null;
-  auth.tokenScopes = [];
-  auth.broadcasterId = null;
-  auth.broadcasterLogin = null;
-  current = new Set();
-  authStore.clear();
+app.post('/auth/logout', (req, res) => {
+  const { sid } = getSessionAuth(req, res);
+  sessions.set(sid, newSessionAuth());
+  persistAuth();
   res.json({ ok: true });
 });
 
 app.get('/track/set', async (req, res) => {
   try {
-    if (!auth.token) return res.status(401).json({ error: 'Not authed yet. Connect Twitch first.' });
+    const { auth: a } = getSessionAuth(req, res);
+    if (!a.token) return res.status(401).json({ error: 'Not authed yet. Connect Twitch first.' });
     const login = String(req.query.channel || '').trim().toLowerCase();
     if (!login) return res.status(400).json({ error: 'Missing ?channel=<twitch_login>' });
 
     const broadcaster = await fetchUserByLogin({
       clientId: staticCfg.clientId,
-      userAccessToken: auth.token,
+      userAccessToken: a.token,
       login
     });
     if (!broadcaster) return res.status(404).json({ error: `Channel not found: ${login}` });
 
-    auth.broadcasterId = broadcaster.id;
-    auth.broadcasterLogin = broadcaster.login;
-    current = store.getOpenSet(auth.broadcasterLogin);
+    a.broadcasterId = broadcaster.id;
+    a.broadcasterLogin = broadcaster.login;
+    a.current = store.getOpenSet(a.broadcasterLogin);
     persistAuth();
-    res.json({ ok: true, broadcasterId: auth.broadcasterId, broadcasterLogin: auth.broadcasterLogin });
+    res.json({ ok: true, broadcasterId: a.broadcasterId, broadcasterLogin: a.broadcasterLogin });
   } catch (e) {
     res.status(500).json({ error: e?.message || String(e) });
   }
 });
 
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, pollMs, lastPollAt, hasError: !!lastError });
+app.get('/health', (req, res) => {
+  const { auth: a } = getSessionAuth(req, res);
+  res.json({ ok: true, pollMs, lastPollAt: a.lastPollAt, hasError: !!a.lastError });
 });
 
-app.get('/state', (_req, res) => {
+app.get('/state', (req, res) => {
+  const { auth: a } = getSessionAuth(req, res);
   res.json({
-    onlineCount: current.size,
-    users: [...current].sort(),
-    lastPollAt,
-    lastError,
+    onlineCount: a.current.size,
+    users: [...a.current].sort(),
+    lastPollAt: a.lastPollAt,
+    lastError: a.lastError,
     enrich: enricher.stats(),
     auth: {
-      authed: !!auth.token,
-      broadcasterLogin: auth.broadcasterLogin,
-      moderatorLogin: auth.meLogin
+      authed: !!a.token,
+      broadcasterLogin: a.broadcasterLogin,
+      moderatorLogin: a.meLogin
     },
-    channel: auth.broadcasterLogin || null
+    channel: a.broadcasterLogin || null
   });
 });
 
 app.get('/events', (req, res) => {
+  const { auth: a } = getSessionAuth(req, res);
   const limit = Math.min(Number(req.query.limit || 100), 1000);
   const offset = Math.max(0, Number(req.query.offset || 0));
-  const channel = String(req.query.channel || auth.broadcasterLogin || '').toLowerCase();
+  const channel = String(req.query.channel || a.broadcasterLogin || '').toLowerCase();
   if (!channel) return res.json({ items: [], total: 0, limit, offset });
   res.json({
     items: store.getEvents(channel, limit, offset),
@@ -290,9 +338,10 @@ app.get('/events', (req, res) => {
 });
 
 app.get('/sessions', (req, res) => {
+  const { auth: a } = getSessionAuth(req, res);
   const limit = Number(req.query.limit || 100);
   const username = req.query.username ? String(req.query.username).toLowerCase() : null;
-  const channel = String(req.query.channel || auth.broadcasterLogin || '').toLowerCase();
+  const channel = String(req.query.channel || a.broadcasterLogin || '').toLowerCase();
   if (!channel) return res.json({ items: [] });
   let items = store.getSessions(channel, Math.min(limit, 1000));
   if (username) items = items.filter(x => (x.username || '').toLowerCase() === username);
@@ -300,9 +349,10 @@ app.get('/sessions', (req, res) => {
 });
 
 app.get('/visitors/popular', (req, res) => {
+  const { auth: a } = getSessionAuth(req, res);
   const limit = Math.min(Number(req.query.limit || 100), 1000);
   const offset = Math.max(0, Number(req.query.offset || 0));
-  const channel = String(req.query.channel || auth.broadcasterLogin || '').toLowerCase();
+  const channel = String(req.query.channel || a.broadcasterLogin || '').toLowerCase();
   if (!channel) return res.json({ items: [], total: 0, limit, offset, channel: null });
   res.json({
     items: store.getPopularVisitors(channel, limit, offset),
