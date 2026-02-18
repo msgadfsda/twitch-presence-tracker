@@ -1,0 +1,337 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Twitch Presence Tracker MVP</title>
+  <style>
+    :root{--bg:#0f1115;--card:#171a21;--muted:#9aa4b2;--text:#e8edf2;--line:#2a2f3a;--accent:#7c5cff;--ok:#24c08b;--warn:#ffb020}
+    *{box-sizing:border-box}
+    body{font-family:Inter,system-ui,Arial,sans-serif;margin:0;background:var(--bg);color:var(--text)}
+    .wrap{max-width:1200px;margin:0 auto;padding:18px}
+    h1{margin:0 0 6px;font-size:24px}
+    .muted{color:var(--muted);font-size:13px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    input,select{background:#0f131a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 10px}
+    button{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:9px 12px;cursor:pointer;font-weight:600}
+    button.secondary{background:#222938;color:#d9e2f0;border:1px solid #30384a}
+    .top{display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-top:12px}
+    .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+    .stat{background:#0f131a;border:1px solid var(--line);border-radius:10px;padding:10px}
+    .stat .k{font-size:12px;color:var(--muted)} .stat .v{font-size:18px;font-weight:700}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+    table{width:100%;border-collapse:collapse;font-size:12px}
+    th,td{border-bottom:1px solid var(--line);padding:8px;text-align:left}
+    th{color:#c5cfdd;font-weight:600;cursor:pointer;position:sticky;top:0;background:var(--card)}
+    tr:hover td{background:#131722}
+    .evt-head,.evt-row{display:grid;grid-template-columns: 1.2fr 1fr .6fr;gap:8px;align-items:center;padding:8px 10px;font-size:12px}
+    .evt-head{position:sticky;top:0;background:#1a2030;color:#c5cfdd;font-weight:700;z-index:2;border-bottom:1px solid var(--line)}
+    .evt-row{position:absolute;left:0;right:0;border-bottom:1px solid #1f2635}
+    .pop-head,.pop-row{display:grid;grid-template-columns:1.3fr .9fr .9fr .9fr .7fr;gap:8px;align-items:center;padding:8px 10px;font-size:12px}
+    .pop-head{position:sticky;top:0;background:#1a2030;color:#c5cfdd;font-weight:700;z-index:2;border-bottom:1px solid var(--line)}
+    .pop-head [data-sort]{cursor:pointer;user-select:none}
+    .pop-row{position:absolute;left:0;right:0;border-bottom:1px solid #1f2635}
+    .badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:700}
+    .partner{background:#40297c;color:#e9deff}.affiliate{background:#1f415f;color:#d9f0ff}.none{background:#2f3543;color:#cad4e3}
+    .dot{display:inline-block;width:10px;height:10px;border-radius:50%}
+    .dot.online{background:var(--ok);box-shadow:0 0 0 2px rgba(36,192,139,.2)}
+    .dot.offline{background:#e05252;box-shadow:0 0 0 2px rgba(224,82,82,.2)}
+    .pill{display:inline-block;border:1px solid var(--line);padding:2px 8px;border-radius:999px;color:var(--muted);font-size:12px}
+    .drawer{position:fixed;right:0;top:0;height:100vh;width:min(520px,95vw);background:#111722;border-left:1px solid var(--line);padding:14px;transform:translateX(110%);transition:.2s;overflow:auto;z-index:20}
+    .drawer.open{transform:translateX(0)}
+    .overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;z-index:19}
+    .overlay.show{display:block}
+    a{color:#8cb4ff}
+    @media(max-width:980px){.top,.grid{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Twitch Presence Tracker</h1>
+    <div id="status" class="muted">Loading...</div>
+
+    <div class="top">
+      <div class="card">
+        <div class="row">
+          <input id="channel" placeholder="Channel login (e.g. ninja)" />
+          <button id="oauthBtn">Connect Twitch + Start</button>
+          <button class="secondary" id="switchBtn">Switch Channel</button>
+          <span class="pill">Requires moderator/broadcaster access</span>
+        </div>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="k">Online now</div><div id="sOnline" class="v">-</div></div>
+        <div class="stat"><div class="k">Events (50)</div><div id="sEvents" class="v">-</div></div>
+        <div class="stat"><div class="k">Known visitors</div><div id="sVisitors" class="v">-</div></div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <section class="card">
+        <div class="row" style="justify-content:space-between;margin-bottom:8px"><h3 style="margin:0">Recent Events</h3><span id="eventsMeta" class="muted">Join/leave feed</span></div>
+        <div id="eventsViewport" style="height:360px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#121723">
+          <div id="eventsInner" style="position:relative"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="row" style="justify-content:space-between;margin-bottom:8px">
+          <h3 style="margin:0">Popular Visitors</h3>
+          <div class="row">
+            <input id="search" placeholder="Search username" style="min-width:170px" />
+            <select id="typeFilter"><option value="">All</option><option value="partner">Partner</option><option value="affiliate">Affiliate</option><option value="none">None</option></select>
+          </div>
+        </div>
+        <div id="popularMeta" class="muted" style="margin-bottom:8px">Loading...</div>
+        <div id="popularViewport" style="height:360px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#121723">
+          <div id="popularInner" style="position:relative"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="overlay" class="overlay"></div>
+  <aside id="drawer" class="drawer">
+    <div class="row" style="justify-content:space-between">
+      <h3 id="drawerTitle" style="margin:0">Visitor details</h3>
+      <button class="secondary" id="closeDrawer">Close</button>
+    </div>
+    <div id="drawerMeta" class="muted" style="margin:8px 0 12px"></div>
+    <table id="sessions"><thead><tr><th>Joined</th><th>Left</th><th>Duration</th></tr></thead><tbody></tbody></table>
+  </aside>
+
+<script>
+let popularItems=[]; let sortKey='followers'; let sortDir='desc';
+let stateUsersSet=new Set();
+let popularTotal=0; let popularLoading=false;
+let eventsItems=[]; let eventsTotal=0; let eventsOffset=0; let eventsLoading=false;
+const EVENTS_PAGE=500; const EVENT_ROW_H=34; const EVENT_HEAD_H=34;
+const POP_PAGE=1000; const POP_ROW_H=34; const POP_HEAD_H=34;
+const statusEl = document.getElementById('status');
+const channelEl = document.getElementById('channel');
+const sOnlineEl = document.getElementById('sOnline');
+const sEventsEl = document.getElementById('sEvents');
+const sVisitorsEl = document.getElementById('sVisitors');
+const fmtTs=(ts)=>ts?new Date(ts).toLocaleString():'-';
+const fmtDur=(sec)=>{ if(sec==null) return '-'; const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), s=sec%60; return `${h}h ${m}m ${s}s`; };
+
+document.getElementById('oauthBtn').addEventListener('click', async ()=>{
+  const btn = document.getElementById('oauthBtn');
+  if (btn.dataset.mode === 'logout') {
+    const ok = confirm('Sign out from Twitch in this tracker?');
+    if (!ok) return;
+    await fetch('/auth/logout', { method: 'POST' });
+    resetEvents();
+    renderEventsVirtual();
+    await refresh();
+    return;
+  }
+  const c=channelEl.value.trim();
+  if(!c) return alert('Enter channel login');
+  location.href=`/auth/start?channel=${encodeURIComponent(c)}`;
+});
+document.getElementById('switchBtn').addEventListener('click',async()=>{
+  const c=channelEl.value.trim();
+  if(!c) return alert('Enter channel login');
+  const r=await fetch(`/track/set?channel=${encodeURIComponent(c)}`);
+  const d=await r.json();
+  if(!r.ok){
+    const msg = d.error || 'Failed to switch channel';
+    if (r.status===401) return alert(`${msg}\n\nYou are not connected yet (or token expired). Click Connect Twitch + Start.`);
+    return alert(`${msg}\n\nNote: your authorized account must be broadcaster/mod in that channel.`);
+  }
+  // Immediately clear old channel UI data while new polling starts
+  resetEvents();
+  resetPopular();
+  stateUsersSet = new Set();
+  sOnlineEl.textContent = '-';
+  sEventsEl.textContent = '-';
+  sVisitorsEl.textContent = '0';
+  renderEventsVirtual();
+  renderPopular();
+
+  await loadMoreEvents();
+  await refresh();
+});
+
+const drawer=document.getElementById('drawer'), overlay=document.getElementById('overlay');
+function closeDrawer(){drawer.classList.remove('open');overlay.classList.remove('show')}
+document.getElementById('closeDrawer').onclick=closeDrawer; overlay.onclick=closeDrawer;
+
+async function openUser(username, displayName){
+  document.getElementById('drawerTitle').textContent = displayName || username;
+  const r=await fetch(`/sessions?limit=500&username=${encodeURIComponent(username)}`); const d=await r.json();
+  document.getElementById('drawerMeta').textContent = `${d.items.length} session(s)`;
+  const b=document.querySelector('#sessions tbody'); b.innerHTML='';
+  for(const s of d.items){ const tr=document.createElement('tr'); tr.innerHTML=`<td>${fmtTs(s.joined_at)}</td><td>${fmtTs(s.left_at)}</td><td>${fmtDur(s.duration_sec)}</td>`; b.appendChild(tr); }
+  drawer.classList.add('open'); overlay.classList.add('show');
+}
+
+function renderEventsVirtual(){
+  const viewport=document.getElementById('eventsViewport');
+  const inner=document.getElementById('eventsInner');
+  const scrollTop=viewport.scrollTop;
+  const vh=viewport.clientHeight;
+  const totalH=EVENT_HEAD_H + eventsItems.length*EVENT_ROW_H;
+  inner.style.height = `${totalH}px`;
+
+  const start=Math.max(0, Math.floor((scrollTop - EVENT_HEAD_H)/EVENT_ROW_H)-8);
+  const end=Math.min(eventsItems.length, start + Math.ceil(vh/EVENT_ROW_H)+18);
+
+  let html=`<div class="evt-head"><div>Time</div><div>User</div><div>Type</div></div>`;
+  for(let i=start;i<end;i++){
+    const e=eventsItems[i];
+    const top=EVENT_HEAD_H + i*EVENT_ROW_H;
+    html += `<div class="evt-row" style="top:${top}px"><div>${fmtTs(e.ts)}</div><div>${e.username}</div><div>${e.event_type}</div></div>`;
+  }
+  inner.innerHTML=html;
+  document.getElementById('eventsMeta').textContent = `Showing ${eventsItems.length.toLocaleString()} / ${eventsTotal.toLocaleString()} events`;
+}
+
+async function loadMoreEvents(){
+  if(eventsLoading) return;
+  if(eventsTotal && eventsItems.length>=eventsTotal) return;
+  eventsLoading=true;
+  try{
+    const r=await fetch(`/events?limit=${EVENTS_PAGE}&offset=${eventsOffset}`);
+    const d=await r.json();
+    eventsItems.push(...(d.items||[]));
+    eventsTotal=d.total||eventsItems.length;
+    eventsOffset=eventsItems.length;
+    sEventsEl.textContent = (eventsTotal || eventsItems.length).toLocaleString();
+    renderEventsVirtual();
+  } finally { eventsLoading=false; }
+}
+
+function resetEvents(){
+  eventsItems=[]; eventsTotal=0; eventsOffset=0;
+}
+
+function getFilteredPopular(){
+  const search=(document.getElementById('search').value||'').toLowerCase().trim();
+  const tf=document.getElementById('typeFilter').value;
+  let items=[...popularItems].filter(x=>{
+    const name=(x.display_name||x.username||'').toLowerCase();
+    const type=(x.broadcaster_type||'none');
+    return (!search || name.includes(search)) && (!tf || type===tf);
+  });
+
+  items.sort((a,b)=>{
+    const aOnline = stateUsersSet.has((a.username||'').toLowerCase()) ? 1 : 0;
+    const bOnline = stateUsersSet.has((b.username||'').toLowerCase()) ? 1 : 0;
+    const av={name:(a.display_name||a.username||''),followers:(a.follower_count||0),type:(a.broadcaster_type||'none'),stay:(a.total_watch_sec||0),online:aOnline}[sortKey];
+    const bv={name:(b.display_name||b.username||''),followers:(b.follower_count||0),type:(b.broadcaster_type||'none'),stay:(b.total_watch_sec||0),online:bOnline}[sortKey];
+    const cmp=av>bv?1:av<bv?-1:0; return sortDir==='asc'?cmp:-cmp;
+  });
+  return items;
+}
+
+function renderPopular(){
+  const viewport=document.getElementById('popularViewport');
+  const inner=document.getElementById('popularInner');
+  const items=getFilteredPopular();
+
+  const scrollTop=viewport.scrollTop;
+  const vh=viewport.clientHeight;
+  const totalH=POP_HEAD_H + items.length*POP_ROW_H;
+  inner.style.height=`${totalH}px`;
+
+  const start=Math.max(0, Math.floor((scrollTop - POP_HEAD_H)/POP_ROW_H)-8);
+  const end=Math.min(items.length, start + Math.ceil(vh/POP_ROW_H)+18);
+
+  let html=`<div class="pop-head"><div data-sort="name">User ↕</div><div data-sort="followers">Followers ↕</div><div data-sort="type">Type ↕</div><div data-sort="stay">Total Stay ↕</div><div data-sort="online">Live ↕</div></div>`;
+  for(let i=start;i<end;i++){
+    const p=items[i];
+    const type=(p.broadcaster_type||'none');
+    const online = stateUsersSet.has((p.username||'').toLowerCase());
+    const top=POP_HEAD_H + i*POP_ROW_H;
+    html += `<div class="pop-row" style="top:${top}px"><div><a href="#" data-u="${p.username}" data-d="${(p.display_name||p.username)}">${p.display_name||p.username}</a></div><div>${p.follower_count ?? '-'}</div><div><span class="badge ${type}">${type}</span></div><div>${fmtDur(p.total_watch_sec)}</div><div><span class="dot ${online?'online':'offline'}"></span></div></div>`;
+  }
+  inner.innerHTML=html;
+  document.getElementById('popularMeta').textContent = `Loaded ${popularItems.length.toLocaleString()} / ${popularTotal.toLocaleString()} visitors`;
+
+  inner.querySelectorAll('a[data-u]').forEach(a=>a.onclick=(e)=>{e.preventDefault(); openUser(a.dataset.u,a.dataset.d)});
+  inner.querySelectorAll('.pop-head [data-sort]').forEach(el=>el.onclick=()=>{const k=el.dataset.sort; if(sortKey===k) sortDir=sortDir==='asc'?'desc':'asc'; else {sortKey=k; sortDir='desc';} renderPopular();});
+}
+
+async function loadAllPopular(){
+  if(popularLoading) return;
+  popularLoading=true;
+  try{
+    let offset=0; let total=0; const all=[];
+    while(true){
+      const r=await fetch(`/visitors/popular?limit=${POP_PAGE}&offset=${offset}`);
+      const d=await r.json();
+      const items=d.items||[];
+      total=d.total||items.length;
+      all.push(...items);
+      offset += items.length;
+      if(!items.length || offset>=total) break;
+    }
+    popularItems = all;
+    popularTotal = total || all.length;
+    sVisitorsEl.textContent = (popularTotal || popularItems.length).toLocaleString();
+    renderPopular();
+  } finally { popularLoading=false; }
+}
+
+function resetPopular(){
+  popularItems=[]; popularTotal=0;
+}
+
+document.getElementById('search').addEventListener('input',renderPopular);
+document.getElementById('typeFilter').addEventListener('change',renderPopular);
+
+document.getElementById('eventsViewport').addEventListener('scroll', async (e) => {
+  renderEventsVirtual();
+  const el=e.currentTarget;
+  if(el.scrollTop + el.clientHeight >= el.scrollHeight - 300){
+    await loadMoreEvents();
+  }
+});
+
+document.getElementById('popularViewport').addEventListener('scroll', () => {
+  renderPopular();
+});
+
+async function refresh(){
+  const [state, auth] = await Promise.all([
+    fetch('/state').then(r=>r.json()), fetch('/auth/status').then(r=>r.json())
+  ]);
+
+  const authText = auth.authed ? `Authed as ${auth.moderatorLogin||'-'} • tracking ${auth.broadcasterLogin||'-'}` : `Not connected yet`;
+  statusEl.textContent = `${authText} • Last poll: ${fmtTs(state.lastPollAt)} • Enrich queued: ${state.enrich?.queued ?? 0}`;
+
+  const oauthBtn = document.getElementById('oauthBtn');
+  if (auth.authed) {
+    oauthBtn.textContent = 'Sign out';
+    oauthBtn.dataset.mode = 'logout';
+    oauthBtn.classList.add('secondary');
+  } else {
+    oauthBtn.textContent = 'Connect Twitch + Start';
+    oauthBtn.dataset.mode = 'connect';
+    oauthBtn.classList.remove('secondary');
+  }
+
+  sOnlineEl.textContent = state.onlineCount ?? '-';
+  sEventsEl.textContent = eventsTotal ? eventsTotal.toLocaleString() : '-';
+  sVisitorsEl.textContent = popularTotal ? popularTotal.toLocaleString() : '-';
+
+  stateUsersSet = new Set((state.users || []).map(u => String(u).toLowerCase()));
+  renderPopular();
+
+  if(eventsItems.length===0){
+    await loadMoreEvents();
+  }
+  if(popularItems.length===0){
+    await loadAllPopular();
+  }
+}
+
+refresh();
+setInterval(refresh,5000);
+setInterval(async ()=>{ if(document.visibilityState==='visible') { await loadMoreEvents(); } }, 7000);
+</script>
+</body>
+</html>

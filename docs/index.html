@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Twitch Presence Tracker</title>
+  <style>
+    body{font-family:Inter,system-ui,Arial,sans-serif;max-width:860px;margin:40px auto;padding:0 16px;line-height:1.45;color:#111}
+    code{background:#f4f4f4;padding:2px 6px;border-radius:6px}
+    pre{background:#111;color:#f2f2f2;padding:12px;border-radius:10px;overflow:auto}
+  </style>
+</head>
+<body>
+  <h1>Twitch Presence Tracker</h1>
+  <p>Tracks inferred Twitch audience presence (join/leave), with popular visitor ranking, follower counts, and session durations.</p>
+  <p><strong>Note:</strong> GitHub Pages hosts static files only. The tracker backend/API must run locally or on a server.</p>
+
+  <h2>Run locally</h2>
+  <pre><code>npm install
+npm run dev</code></pre>
+  <p>Then open <code>http://localhost:8787</code>.</p>
+
+  <h2>OAuth setup</h2>
+  <p>Set environment variables:</p>
+  <pre><code>TWITCH_CLIENT_ID=...
+TWITCH_CLIENT_SECRET=...
+TWITCH_REDIRECT_URI=http://localhost:8787/auth/callback</code></pre>
+
+  <h2>Repo</h2>
+  <p>See README for full details and roadmap.</p>
+</body>
+</html>
