@@ -183,7 +183,9 @@ function renderEventsVirtual(){
   for(let i=start;i<end;i++){
     const e=eventsItems[i];
     const top=EVENT_HEAD_H + i*EVENT_ROW_H;
-    html += `<div class="evt-row" style="top:${top}px"><div>${fmtTs(e.ts)}</div><div>${e.username}</div><div>${e.event_type}</div></div>`;
+    const uname = e.username || '';
+    const uenc = encodeURIComponent(uname);
+    html += `<div class="evt-row" style="top:${top}px"><div>${fmtTs(e.ts)}</div><div><a href="https://www.twitch.tv/${uenc}" target="_blank" rel="noopener noreferrer">${uname}</a></div><div>${e.event_type}</div></div>`;
   }
   inner.innerHTML=html;
   document.getElementById('eventsMeta').textContent = `Showing ${eventsItems.length.toLocaleString()} / ${eventsTotal.toLocaleString()} events`;
@@ -246,12 +248,13 @@ function renderPopular(){
     const type=(p.broadcaster_type||'none');
     const online = stateUsersSet.has((p.username||'').toLowerCase());
     const top=POP_HEAD_H + i*POP_ROW_H;
-    html += `<div class="pop-row" style="top:${top}px"><div><a href="#" data-u="${p.username}" data-d="${(p.display_name||p.username)}">${p.display_name||p.username}</a></div><div>${p.follower_count ?? '-'}</div><div><span class="badge ${type}">${type}</span></div><div>${fmtDur(p.total_watch_sec)}</div><div><span class="dot ${online?'online':'offline'}"></span></div></div>`;
+    const uname = p.username || '';
+    const uenc = encodeURIComponent(uname);
+    html += `<div class="pop-row" style="top:${top}px"><div><a href="https://www.twitch.tv/${uenc}" target="_blank" rel="noopener noreferrer">${p.display_name||p.username}</a></div><div>${p.follower_count ?? '-'}</div><div><span class="badge ${type}">${type}</span></div><div>${fmtDur(p.total_watch_sec)}</div><div><span class="dot ${online?'online':'offline'}"></span></div></div>`;
   }
   inner.innerHTML=html;
   document.getElementById('popularMeta').textContent = `Loaded ${popularItems.length.toLocaleString()} / ${popularTotal.toLocaleString()} visitors`;
 
-  inner.querySelectorAll('a[data-u]').forEach(a=>a.onclick=(e)=>{e.preventDefault(); openUser(a.dataset.u,a.dataset.d)});
   inner.querySelectorAll('.pop-head [data-sort]').forEach(el=>el.onclick=()=>{const k=el.dataset.sort; if(sortKey===k) sortDir=sortDir==='asc'?'desc':'asc'; else {sortKey=k; sortDir='desc';} renderPopular();});
 }
 
