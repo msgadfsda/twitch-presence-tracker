@@ -8,6 +8,7 @@ import { createEnricher } from './enrich.js';
 import { createAuthStore } from './authStore.js';
 
 const app = express();
+app.set('trust proxy', 1);
 const port = Number(process.env.PORT || 8787);
 const pollMs = Number(process.env.POLL_MS || 15000);
 
@@ -93,11 +94,11 @@ function parseCookies(req) {
 function getSid(req, res) {
   const cookies = parseCookies(req);
   let sid = cookies.tp_sid;
-  if (!sid) {
-    sid = crypto.randomBytes(24).toString('hex');
-    const secure = (req.headers['x-forwarded-proto'] || '').toString().includes('https') ? '; Secure' : '';
-    res.setHeader('Set-Cookie', `tp_sid=${sid}; Path=/; HttpOnly; SameSite=Lax${secure}`);
-  }
+  if (!sid) sid = crypto.randomBytes(24).toString('hex');
+
+  const secure = req.secure || (req.headers['x-forwarded-proto'] || '').toString().includes('https');
+  // Persist browser session identity for 30 days so auth survives tab/browser restarts.
+  res.setHeader('Set-Cookie', `tp_sid=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 30}${secure ? '; Secure' : ''}`);
   return sid;
 }
 
@@ -204,7 +205,7 @@ app.get('/auth/start', (req, res) => {
   const state = crypto.randomBytes(18).toString('hex');
   oauthState.set(state, { sid, broadcasterLogin, createdAt: Date.now() });
 
-  const scope = encodeURIComponent('moderator:read:chatters moderator:read:followers');
+  const scope = encodeURIComponent('moderator:read:chatters moderator:read:followers offline_access');
   const url = `https://id.twitch.tv/oauth2/authorize?client_id=${encodeURIComponent(staticCfg.clientId)}&redirect_uri=${encodeURIComponent(staticCfg.redirectUri)}&response_type=code&scope=${scope}&state=${state}`;
   res.redirect(url);
 });
